@@ -1,0 +1,423 @@
+---
+title: "All Data North Dakota"
+author: "Isaac Simonelli"
+date: "10/3/2021"
+output: 
+   html_document:
+     code_download: true
+     code_folding: show
+     toc: true
+     toc_float: true
+     df_print: paged
+     theme: united
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(rmarkdown)
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(readxl)
+library(gt)
+library(sf)
+
+#this is an attempt to get rid of the scientific notation problem when reading in Excel files. I have no idea if it will work .
+options (scipen = 999)
+
+```
+
+
+##The Summary of Project and Data Location
+
+Companies in North Dakota are required to report their flaring data on a monthly basis, venting is illegal in the state. 
+
+This information is compiled by the state into a monthly form on the ND Department of Mineral Resources's website. 
+
+Downloaded data from: the ND Department of Mineral Resources website’s Monthly Production Report Index (https://www.dmr.nd.gov/oilgas/mprindex.asp). 
+
+
+The data is saved in yearly folders in this project. The data from 2012to2015 is from a public records request and is in a slightly different format than the data downloaded from the site. 
+
+
+### Differences between old and new data
+
+The new data saves the API Well Number and the File Number as numerals, but the old data saves them (correctly) as text. This means we have to read them in differently, and make the conversion explicit. We'll do that on the new data.  The structures and the data types are shown in the spreadsheet in this folder called `orig_file_structures.xlsx`
+
+
+## Creating a master data frame
+
+### Recent year processing
+
+The first step is to recursively read the Excel files from the folders from 2015 to 2020
+
+Those files are named in the form year_month.xlsx (example: 2020_01.xlsx). We can read through the subdirectories in this project to find their names. the second row of this command makes sure it's coming from the right folders -- those with names of years alone. 
+
+
+```{r listoffiles}
+
+list_file <- list.files( recursive=TRUE, pattern="\\d{4}_\\d{2}\\.xlsx") %>%
+  str_subset ( ., "20\\d{2}/\\d{4}")
+
+print(list_file)
+
+
+```
+
+Now we take these 73 file names, and use a loop to read them into a data frame. 
+
+```{r readxl_loop}
+
+
+rm(cumulative_df, xl_translated)
+
+
+# walk through that list of file names I created above.
+for (f in list_file) {
+  
+  #create a temporary data frame reading that file with all columns as text. This idea of a temporary data frame is super helpful and prevents you from cluttering up your global environment... as I've kind of done on this project.
+  xl_translated <- read_excel(f, 
+          col_types = c("date", "numeric", "numeric", 
+                        "text", "text", "text", 
+                        "numeric", "numeric", "numeric", 
+                        "text", "text", "text", 
+                        "numeric", "numeric", "numeric",  "numeric",  "numeric",  
+                        "numeric",  "numeric",  "numeric",  "numeric"), 
+          na = "NULL") %>%
+          #and save the name of the file to a new variable. 
+          mutate ( file_name = f) 
+  
+  # I want to put them all together. If the dataset already exists, add the rows. If it doesn't, then 
+  # create a new data frame
+   
+  if (!exists("cumulative_df") ) {
+    cumulative_df <- xl_translated
+  } else {
+    cumulative_df <- bind_rows(cumulative_df, xl_translated)
+  }
+  
+  # give yourself a handle on how far along the program is by printing out the name
+  # when it's done. 
+   print (paste0("done with ", f))
+  
+}
+  
+
+```
+
+We have to convert the API well number and file numbers to text, ignoring any scientific notation used. This will make them the same data type as the older data. (We've read in the numbers we want to use as numbers this time, so that's ok. ) 
+
+We're not looking at 2021 data because there's potential that those numbers are preliminary and will be updated with in a year, so filter from 2015 to 2020. 
+
+
+```{r create_big_nd}
+
+nd_2015_2020 <- cumulative_df %>%
+  clean_names() %>%
+  mutate ( across ( c(api_wellno, file_no), ~format (., scientific=FALSE) ), 
+           report_date = lubridate::as_date( report_date) ) %>%
+  filter ( between ( report_date, mdy("1/1/2015"), mdy("12/31/2020")))
+
+
+# and get a count per month
+count(nd_2015_2020, report_date) %>%
+  arrange ( desc(n))
+
+
+
+```
+
+
+
+Checking the conversion related to scientific notation: 
+
+```{r}
+
+nd_2015_2020 %>%
+  group_by ( api_wellno) %>%
+  summarise (n=  n_distinct ( file_no)) %>%
+  filter (n > 1)
+
+
+```
+
+Phew ! Every api well number has only one file number, so they're correct now. 
+
+
+### Read older data
+
+So, we've just paid to have the North Dakota data from 2012 to mid-2015 (it was about $50 for the staff's time). Unfortunately, the excel files are organized slightly differently. The data from 2012 to mid-2015 contains a few more fields that aren't in the later data sets.
+
+The 2012 to mid-2015 data we have lives on our Google Drive here: https://drive.google.com/drive/folders/1yEbWXV6RO0qe1V003RWTtVDueL_VrM1j?usp=sharing
+
+I downloaded it to my external hard drive so I could continue to work on it at the Howard Center and at home.
+
+One thing to keep in mind is that this data set only includes the first 4 months of 2015, while we had the other 8 months of data from 2015 in what was posted in Excel online.
+
+This data set includes a lot of new columns, including "conf," "MCF_Lease," "CumOil," "CumWater," "CumGas," "BIA Lease," and "Well Confidential." There's also a row for month and year, but not single date column. For now, we're just keeping the variables that match across the years. 
+
+The column for BIA Lease seems interesting, but I'm not sure what to do with it yet. For the sake of where we are now, we're just going to try to change these data sheets into something that matches what we already have and use those. It does raise the question of why did they stop tracking what projects were on BIA leases in 2015 -- something we can raise with federal and state regulators.
+
+### Older sheet structure
+
+Here is a random one, where we read it in as text, convert the sheet name to a date, then select with the same names as we have in the same order as the newer data. This is not being saved into a dataframe to avoid it ever being duplicated. 
+
+In these sheets, the file number and API well numbers are correctly saved as text fields, so we need to treat them that way. 
+
+
+Here's a test of the way we'll read it in:
+
+```{r test_older_sheets, eval=FALSE}
+
+ read_excel( "2012to2015/2014.xlsx", sheet= "June 2014", 
+                  col_types = c("text", 
+                                "text", "text", "text", "text", "text", "text", "text", 
+                                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                                "text", "text", 
+                                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                                "numeric", 
+                                "text", "text", "text") ,
+                na="NULL") %>%
+  mutate (        ReportDate = mdy ( paste0 (Month, "/1/", Year) 
+                           )
+          ) %>% 
+
+    select ( ReportDate, 
+           API_WellNo, FileNo, Company=Operator, WellName, Quarter=QtrQtr, Section=Sec, Township=Twp, 
+           Range=Rng, County, FieldName=Field, Pool, Oil=BBLS_OIL, Wtr=BBLS_WTR, Days=DAYS, 
+           Runs=OIL_RUNS, Gas=MCF_GAS, Days=DAYS, 
+           GasSold = MCF_SOLD, Flared=MCF_FLARED, Lat= Wh_Lat, Long=Wh_Long, Year, Month)   
+  
+
+
+```
+
+
+### Looping through the older files
+
+There are three files, each with 12 sheets: 
+
+```{r file_sheet_names}
+
+years <- c("2012":"2015")
+
+
+filenames <- paste0("2012to2015/", years, ".xlsx")
+
+for (f in filenames) {
+  print (f)
+  print (excel_sheets( f))
+}
+
+
+
+```
+
+
+### Create early years data
+
+This part reads in all of the sheets from each of the annual workbooks, and compiles them into one data frame with the same variables as the later years, and names that will become the same. 
+
+There appears to be one error in the spreadsheets they gave us: February 2014 appears to be in there twice, and February 2015 is missing. It SEEMS that they have the wrong year in the year column in the 2015 sheet, because it's a different number of rows than in the 2014 one. Here, we fix that year, but we need to check it with the agency to be sure it's right. 
+
+
+
+```{r warning=FALSE}
+
+rm(cumulative_early_years )
+
+for (f in filenames) {
+  sheets <- excel_sheets(f)
+    
+    #now go through each of them 
+    for (s in sheets ) {
+    
+    # now read the sheet and put it into a dataframe the same way we did before
+    # get the variables with the same names and the same order that they are in the
+    # other data frame. 
+    
+    xl_translated <- read_excel( f, sheet= s, 
+                      col_types = c("text", 
+                                "text", "text", "text", "text", "text", "text", "text", 
+                                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                                "text", "text", 
+                                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                                "numeric", 
+                                "text", "text", "text") ,
+                na="NULL") %>%
+          mutate ( sheet_name = s,
+                   use_year = if_else (sheet_name == "Feb 2015", "2015", Year), 
+                   ReportDate = mdy( paste0(Month, "/1/", use_year)), 
+                  file_name = paste( f, s, sep=": ")
+                  ) %>%    
+          select ( ReportDate, 
+            api_wellno = API_WellNo, FileNo, 
+            Company=Operator, WellName, Quarter=QtrQtr, Section=Sec, Township=Twp, 
+            Range=Rng, County, FieldName=Field, Pool, Oil=BBLS_OIL, Wtr=BBLS_WTR, Days=DAYS, 
+            Runs=OIL_RUNS, Gas=MCF_GAS, Days=DAYS, 
+            GasSold = MCF_SOLD, Flared=MCF_FLARED, Lat= Wh_Lat, Long=Wh_Long, Year,  Month, file_name, sheet_name)  
+  
+  
+   if (!exists("cumulative_early_years") ) {
+      cumulative_early_years <- xl_translated
+      } else {
+       cumulative_early_years <- bind_rows(cumulative_early_years, xl_translated)
+      }
+  
+   # give yourself a handle on how far along the program is by printing out the name
+   # when it's done. 
+    print (paste0("done with ", f, ": ", s))      
+          
+    } # end of each sheet
+  
+  
+} #end of each file. 
+
+count(cumulative_early_years, ReportDate) %>%
+  arrange ( desc (n))
+
+
+  nd_2012_2015 <- cumulative_early_years %>%
+  clean_names() %>%
+  select ( report_date : long, file_name )
+
+
+
+
+
+```
+
+This seems to have fixed the Feb 2014/2015 , but we still have to check with the agency that the fix is correct. 
+
+Here is some code that you could run to test it - I don't think it's necessary anymore:
+
+```{r test_years}
+
+cumulative_early_years %>%
+   select ( file_name, Year, ReportDate) %>%
+   mutate ( orig_file_name = file_name) %>%
+   extract( file_name, into=c( "file_year"), regex= "/(\\d{4})\\.") %>%
+   count ( orig_file_name, Year, file_year, ReportDate) %>%
+   filter ( file_year != Year)
+  
+
+
+```
+
+This shows that the report date was corrected in Feb. 2015, from the original Year in the dataset to the 2015 that it should be. 
+
+
+```{r}
+
+nd_master <- nd_2012_2015 %>% add_row ( nd_2015_2020)
+
+#now remove everything else so we don't get confused, and make sure to re-create if we need it. 
+rm( list=ls()[ls() != "nd_master"])
+
+```
+
+
+
+## Integrity checks
+
+
+The agency said file number, API well number, pool and date are the unique records. Let's check for them 
+
+
+```{r getdupes_allyears}
+
+nd_master %>%
+  get_dupes ( report_date, api_wellno, file_no, field_name, pool)  
+
+```
+
+
+There are 42 dupes, but none of them have any production or flaring, so they won't affect anything but the NUMBER OF RECORDS. Because of that, we'll just pick up the last of the ones that are in the files. This isn't enough to make a big deal of. We'll get rid of them, then save the file for later use.  There were 1550838 rows in this example.
+
+```{r getridofdupes}
+
+nd_master <- 
+  nd_master %>%
+  group_by ( report_date, file_no, api_wellno, field_name, pool) %>%
+  slice_tail() %>%
+  ungroup() 
+
+
+
+#and save it for later.
+save(nd_master, file = "north_dakota_orig.Rda")
+
+
+
+```
+
+And we ended up with 1550817 records (21, not 42 fewer, because we want to keep one of each of the duplicates.)
+
+**This saved version of the nd_master data frame will be used in the analysis markdown. **
+
+### Checking production numbers against state reports
+
+North Dakota doesn't publish reports from their data for flaring, but they do report totals for production. This chunk will get those totals to check against the reports 
+heres: <https://www.dmr.nd.gov/oilgas/stats/annualprod.pdf>
+
+
+![](oil_prod_totals.jpg)
+
+
+```{r}
+
+nd_master %>%
+  group_by ( year = year(report_date)) %>%
+  summarise ( oil = sum(oil, na.rm = TRUE))  %>%
+  gt::gt ( ) %>%
+  gt::fmt_number( columns= c(oil), use_seps=T, decimals=0)
+
+```
+
+
+I converted the PDF file to an Excel workbook (to deal with the commas in the numbers), and cleaned it up a bit. Here's the result: 
+
+```{r get_production}
+
+oil_prod_totals <- 
+  read_excel("annualprod.xlsx") 
+
+```
+
+
+
+... and get the matching numbers that we can from the dataset we've created:
+
+```{r}
+
+nd_master %>%
+  filter ( oil > 0) %>%
+  group_by ( year = year(report_date) ) %>%
+  summarise ( wells_computed = n_distinct ( api_wellno), 
+              oil_computed = sum (oil, na.rm=T)) %>%
+  left_join ( oil_prod_totals, by="year") %>%
+  mutate ( diff_wells = wells_producing - wells_computed, 
+           diff_oil = year_oil_total - oil_computed, 
+           diff_as_pct = diff_oil / year_oil_total) %>%
+  select (year:oil_computed, wells_producing, year_oil_total:diff_as_pct) %>%
+  gt () %>%
+  gt::fmt_number( columns= c(wells_computed:diff_oil), use_seps=T, decimals=0) %>%
+  gt::fmt_percent (columns = c(diff_as_pct ))
+
+
+```
+
+
+The state has told us that the data they release by well excludes "confidential" production. We don't know if that will affect flaring numbers, but we are always lower than the state's total oil production. We may need to acknowledge this in the data. But for the time being, this data frame is the closest we are going to get to the state flaring numbers. 
+
+
+
+
+
+
+
+
